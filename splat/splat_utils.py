@@ -10,7 +10,7 @@ from ellipsoids.covariance_utils import compute_cov
 from ns_utils.nerfstudio_utils import GaussianSplat, SH2RGB
 
 class GSplatLoader():
-    def __init__(self, gsplat_location, device):
+    def __init__(self, gsplat_location, device, filter_gaussians=True):
         self.device = device
 
         if isinstance(gsplat_location, str):
@@ -19,6 +19,10 @@ class GSplatLoader():
             self.load_gsplat_from_nerfstudio(gsplat_location)
         else:
             raise ValueError('GSplat file must be either a .json or .yml file.')
+
+        # Apply filtering after loading
+        if filter_gaussians:
+            self.filter_low_quality_gaussians()
         
     def load_gsplat_from_nerfstudio(self, gsplat_location):
 
@@ -79,7 +83,54 @@ class GSplatLoader():
         self.covs_inv = compute_cov(self.rots, 1. / self.scales)
         self.covs = compute_cov(self.rots, self.scales)
 
-        return 
+        return
+
+    def filter_low_quality_gaussians(self, opacity_threshold=0.1, scale_percentile=95, distance_percentile=99):
+        """
+        Filter out low-quality Gaussians to reduce memory usage and improve quality.
+
+        Args:
+            opacity_threshold: Remove Gaussians with opacity below this value (default: 0.1)
+            scale_percentile: Remove Gaussians with max scale above this percentile (default: 95)
+            distance_percentile: Remove Gaussians beyond this distance percentile from center (default: 99)
+        """
+        num_original = self.means.shape[0]
+
+        # 1. Opacity filter (most effective)
+        opacity_mask = self.opacities.squeeze() >= opacity_threshold
+
+        # 2. Scale filter (remove outliers)
+        max_scales = torch.max(self.scales, dim=-1)[0]  # Max scale per Gaussian
+        scale_threshold = torch.quantile(max_scales, scale_percentile / 100.0)
+        scale_mask = max_scales <= scale_threshold
+
+        # 3. Distance filter (remove distant Gaussians)
+        center = torch.median(self.means, dim=0)[0]  # Scene center
+        distances = torch.norm(self.means - center, dim=-1)
+        distance_threshold = torch.quantile(distances, distance_percentile / 100.0)
+        distance_mask = distances <= distance_threshold
+
+        # Combine all filters
+        combined_mask = opacity_mask & scale_mask & distance_mask
+
+        # Apply filter
+        self.means = self.means[combined_mask]
+        self.rots = self.rots[combined_mask]
+        self.scales = self.scales[combined_mask]
+        self.colors = self.colors[combined_mask]
+        self.opacities = self.opacities[combined_mask]
+        self.covs = self.covs[combined_mask]
+        self.covs_inv = self.covs_inv[combined_mask]
+
+        num_filtered = self.means.shape[0]
+        reduction_pct = 100 * (1 - num_filtered / num_original)
+
+        print(f'[Filter] Reduced Gaussians: {num_original:,} → {num_filtered:,} ({reduction_pct:.1f}% removed)')
+        print(f'  - Opacity < {opacity_threshold}: {(~opacity_mask).sum().item():,}')
+        print(f'  - Scale > {scale_percentile}%ile: {(~scale_mask).sum().item():,}')
+        print(f'  - Distance > {distance_percentile}%ile: {(~distance_mask).sum().item():,}')
+
+        return combined_mask
 
     def save_mesh(self, filepath, bounds=None, res=4):
         if bounds is not None:
