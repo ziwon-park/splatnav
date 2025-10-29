@@ -177,9 +177,23 @@ class SafeFlightCorridor(Corridor):
         torch.cuda.synchronize()
 
         path = self.generate_initialization(x0, xf)
-        
+
         torch.cuda.synchronize()
         time_astar = time.time() - tnow
+
+        # Check if path is None (no feasible path found)
+        if path is None:
+            print(f"[ERROR] No feasible path found between start {x0.cpu().numpy()} and goal {xf.cpu().numpy()}")
+            return {
+                'trajectory': None,
+                'feasible': False,
+                'plan_time': time.time() - tnow,
+                'time_astar': time_astar,
+                'time_collision_set': 0,
+                'time_ellipsoid': 0,
+                'time_polytope': 0,
+                'time_qp': 0
+            }
 
         polytopes = []      # List of polytopes (A, b)
         segments = torch.tensor(np.stack([path[:-1], path[1:]], axis=1), device=self.device)        # line segments (N x 2 x 3)
