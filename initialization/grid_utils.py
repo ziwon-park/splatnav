@@ -188,13 +188,16 @@ class PointCloudVoxel(Voxel):
         lib_module = unfoldNd.UnfoldNd(
             kernel_size, dilation=1, padding=padding, stride=1
         )
-        unfolded = lib_module(self.non_navigable_grid.to(dtype=torch.float32)[None, None]).squeeze()     # kernel_size x N x N x N
+
+        # Move to CPU to avoid GPU OOM for large grids
+        grid_cpu = self.non_navigable_grid.to(dtype=torch.float32, device='cpu')[None, None]
+        unfolded = lib_module(grid_cpu).squeeze()     # kernel_size x N x N x N
         unfolded = unfolded.to(dtype=bool)
 
         # Take the maxpool3d of the binary grid
-        mask = self.robot_mask.reshape(-1)
+        mask = self.robot_mask.cpu().reshape(-1)
         unfolded = unfolded[mask]       # mask_size x N x N x N
-        self.non_navigable = torch.any(unfolded, dim=0).reshape(self.resolution[0], self.resolution[1], self.resolution[2])  
+        self.non_navigable = torch.any(unfolded, dim=0).reshape(self.resolution[0], self.resolution[1], self.resolution[2]).to(self.device)  
 
 class GSplatVoxel(Voxel):
     def __init__(self, gsplat, lower_bound, upper_bound, resolution, radius, device):
@@ -336,13 +339,16 @@ class GSplatVoxel(Voxel):
             lib_module = unfoldNd.UnfoldNd(
                 kernel_size, dilation=1, padding=padding, stride=1
             )
-            unfolded = lib_module(self.non_navigable_grid.to(dtype=torch.float32)[None, None]).squeeze()     # kernel_size x N x N x N
+
+            # Move to CPU to avoid GPU OOM for large grids
+            grid_cpu = self.non_navigable_grid.to(dtype=torch.float32, device='cpu')[None, None]
+            unfolded = lib_module(grid_cpu).squeeze()     # kernel_size x N x N x N
             unfolded = unfolded.to(dtype=bool)
 
             # Take the maxpool3d of the binary grid
-            mask = self.robot_mask.reshape(-1)
+            mask = self.robot_mask.cpu().reshape(-1)
             unfolded = unfolded[mask]       # mask_size x N x N x N
-            non_navigable = torch.any(unfolded, dim=0).reshape(self.resolution[0], self.resolution[1], self.resolution[2])  
+            non_navigable = torch.any(unfolded, dim=0).reshape(self.resolution[0], self.resolution[1], self.resolution[2]).to(self.device)
             self.non_navigable_grid = non_navigable
 
         return
