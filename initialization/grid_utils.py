@@ -109,15 +109,20 @@ class PointCloudVoxel(Voxel):
     def __init__(self, point_cloud, lower_bound, upper_bound, resolution, radius, device):
         super().__init__(lower_bound, upper_bound, resolution, radius, device)
         self.point_cloud = point_cloud
-    
+
         with torch.no_grad():
             self.generate_kernel()
             self.create_navigable_grid()
 
     def generate_kernel(self):
-        # Functions find the voxelized overapproximation of the Minkowski sum 
+        # Functions find the voxelized overapproximation of the Minkowski sum
 
         rad_cell = torch.ceil(self.radius / self.cell_sizes - 0.5)
+
+        # Ensure minimum kernel size of 3x3x3 to avoid indexing errors
+        # This prevents issues when robot radius is smaller than cell size
+        rad_cell = torch.maximum(rad_cell, torch.ones_like(rad_cell))
+
         lower_bound = -rad_cell
         upper_bound = rad_cell
 
@@ -341,11 +346,16 @@ class GSplatVoxel(Voxel):
             self.non_navigable_grid = non_navigable
 
         return
-    
+
     def generate_kernel(self):
-        # Functions find the voxelized overapproximation of the Minkowski sum 
+        # Functions find the voxelized overapproximation of the Minkowski sum
 
         rad_cell = torch.ceil(self.radius / self.cell_sizes - 0.5)
+
+        # Ensure minimum kernel size of 3x3x3 to avoid indexing errors
+        # This prevents issues when robot radius is smaller than cell size
+        rad_cell = torch.maximum(rad_cell, torch.ones_like(rad_cell))
+
         lower_bound = -rad_cell
         upper_bound = rad_cell
 
