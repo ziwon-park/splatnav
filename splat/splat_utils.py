@@ -1,5 +1,6 @@
 import json
 import torch
+import numpy as np
 from pathlib import Path
 import open3d as o3d
 import time
@@ -14,11 +15,19 @@ class GSplatLoader():
         self.device = device
 
         if isinstance(gsplat_location, str):
-            self.load_gsplat_from_json(gsplat_location)
+            # Check file extension
+            if gsplat_location.endswith('.json'):
+                self.load_gsplat_from_json(gsplat_location)
+            elif gsplat_location.endswith('.splat'):
+                self.load_gsplat_from_splat(gsplat_location)
+            elif gsplat_location.endswith('.ply'):
+                self.load_gsplat_from_ply(gsplat_location)
+            else:
+                raise ValueError('Unknown file format. Supported: .json, .splat, .ply')
         elif isinstance(gsplat_location, Path):
             self.load_gsplat_from_nerfstudio(gsplat_location)
         else:
-            raise ValueError('GSplat file must be either a .json or .yml file.')
+            raise ValueError('GSplat file must be a Path (.yml) or string (.json/.splat/.ply).')
 
         # Apply filtering after loading
         if filter_gaussians:
@@ -82,6 +91,115 @@ class GSplatLoader():
         # Measure time for computing Sigma inverse
         self.covs_inv = compute_cov(self.rots, 1. / self.scales)
         self.covs = compute_cov(self.rots, self.scales)
+
+        return
+
+    def load_gsplat_from_splat(self, gsplat_location):
+        """
+        Load from .splat binary format (Antimatter15/splat format).
+        Each Gaussian: 14 floats (56 bytes)
+        - position (3), scale (3), color (4 RGBA), rotation (4 quaternion)
+        """
+        import struct
+
+        with open(gsplat_location, 'rb') as f:
+            data = f.read()
+
+        # Each Gaussian is 14 floats (4 bytes each) = 56 bytes
+        num_gaussians = len(data) // (14 * 4)
+
+        means = []
+        scales = []
+        colors = []
+        opacities = []
+        rots = []
+
+        for i in range(num_gaussians):
+            offset = i * 14 * 4
+            gaussian = struct.unpack('14f', data[offset:offset + 56])
+
+            means.append(gaussian[0:3])      # xyz position
+            scales.append(gaussian[3:6])     # scale (log space)
+            colors.append(gaussian[6:9])     # rgb
+            opacities.append(gaussian[9])    # alpha
+            rots.append(gaussian[10:14])     # quaternion wxyz
+
+        # Convert to tensors
+        self.means = torch.tensor(means, dtype=torch.float32, device=self.device)
+        self.scales = torch.tensor(scales, dtype=torch.float32, device=self.device)
+        self.colors = torch.tensor(colors, dtype=torch.float32, device=self.device)
+        self.opacities = torch.tensor(opacities, dtype=torch.float32, device=self.device).unsqueeze(-1)
+        self.rots = torch.tensor(rots, dtype=torch.float32, device=self.device)
+
+        # Apply transformations
+        self.opacities = torch.sigmoid(self.opacities)
+        self.scales = torch.exp(self.scales)
+
+        # Compute covariances
+        self.covs_inv = compute_cov(self.rots, 1. / self.scales)
+        self.covs = compute_cov(self.rots, self.scales)
+
+        print(f'[.splat] Loaded {num_gaussians:,} Gaussians from {gsplat_location}')
+
+        return
+
+    def load_gsplat_from_ply(self, gsplat_location):
+        """
+        Load from .ply format (standard Gaussian Splatting PLY with extended attributes).
+        Uses plyfile library to parse.
+        """
+        try:
+            from plyfile import PlyData
+        except ImportError:
+            raise ImportError('plyfile not installed. Run: pip install plyfile')
+
+        plydata = PlyData.read(gsplat_location)
+        vertex = plydata['vertex']
+
+        # Extract position
+        means = np.stack([vertex['x'], vertex['y'], vertex['z']], axis=1)
+
+        # Extract scale (f_dc_0, f_dc_1, f_dc_2 or scale_0, scale_1, scale_2)
+        try:
+            scales = np.stack([vertex['scale_0'], vertex['scale_1'], vertex['scale_2']], axis=1)
+        except:
+            # Try alternative naming
+            scales = np.stack([vertex['scale_x'], vertex['scale_y'], vertex['scale_z']], axis=1)
+
+        # Extract colors (f_dc_0, f_dc_1, f_dc_2 or r, g, b)
+        try:
+            colors = np.stack([vertex['f_dc_0'], vertex['f_dc_1'], vertex['f_dc_2']], axis=1)
+        except:
+            colors = np.stack([vertex['red'], vertex['green'], vertex['blue']], axis=1) / 255.0
+
+        # Extract opacity
+        try:
+            opacities = vertex['opacity']
+        except:
+            opacities = vertex['alpha']
+
+        # Extract rotation (quaternion)
+        try:
+            rots = np.stack([vertex['rot_0'], vertex['rot_1'], vertex['rot_2'], vertex['rot_3']], axis=1)
+        except:
+            rots = np.stack([vertex['qw'], vertex['qx'], vertex['qy'], vertex['qz']], axis=1)
+
+        # Convert to tensors
+        self.means = torch.tensor(means, dtype=torch.float32, device=self.device)
+        self.scales = torch.tensor(scales, dtype=torch.float32, device=self.device)
+        self.colors = torch.tensor(colors, dtype=torch.float32, device=self.device)
+        self.opacities = torch.tensor(opacities, dtype=torch.float32, device=self.device).unsqueeze(-1)
+        self.rots = torch.tensor(rots, dtype=torch.float32, device=self.device)
+
+        # Apply transformations (if needed)
+        self.opacities = torch.sigmoid(self.opacities)
+        self.scales = torch.exp(self.scales)
+
+        # Compute covariances
+        self.covs_inv = compute_cov(self.rots, 1. / self.scales)
+        self.covs = compute_cov(self.rots, self.scales)
+
+        print(f'[.ply] Loaded {len(means):,} Gaussians from {gsplat_location}')
 
         return
 
